@@ -1,17 +1,28 @@
+# -*- coding: utf-8 -*-
+# Part of Odoo. See LICENSE file for full copyright and licensing details.
 import base64
+from datetime import datetime
 
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError
-from datetime import datetime
 
 
-
-class InheritAccountMove(models.Model):
+class AccountMove(models.Model):
     _inherit = 'account.move'
 
-    l10n_sa_qr_code_str = fields.Char(string='Zatka QR Code', compute='_compute_qr_code_str')
+    l10n_sa_delivery_date = fields.Date(string='Delivery Date', default=fields.Date.context_today, copy=False)
+    l10n_sa_show_delivery_date = fields.Boolean(compute='_compute_show_delivery_date', store=True)
+    l10n_sa_qr_code_str = fields.Char(string='Zatka QR Code', compute='_compute_qr_code_str', store=True)
+    l10n_sa_confirmation_datetime = fields.Datetime(string='Confirmation Date', readonly=True, copy=False)
+    country_code = fields.Char(related='company_id.country_id.code', readonly=True)
 
-    @api.depends('amount_total', 'amount_untaxed', 'invoice_date', 'company_id', 'company_id.vat')
+    @api.depends('country_code')
+    def _compute_show_delivery_date(self):
+        for move in self:
+            move.l10n_sa_show_delivery_date = move.country_code == 'SA'
+
+    @api.depends('amount_total', 'amount_untaxed', 'invoice_date', 'l10n_sa_confirmation_datetime', 'company_id',
+                 'company_id.vat')
     def _compute_qr_code_str(self):
         print('calling compute qr code method')
         """ Generate the qr code for Saudi e-invoicing. Specs are available at the following link at page 23
@@ -32,15 +43,26 @@ class InheritAccountMove(models.Model):
                 company_vat_enc = get_qr_encoding(2, record.company_id.vat)
                 if record.l10n_sa_confirmation_datetime:
                     time_sa = fields.Datetime.context_timestamp(self.with_context(tz='Asia/Riyadh'),
-                                                            record.l10n_sa_confirmation_datetime)
+                                                                record.l10n_sa_confirmation_datetime)
                 elif record.l10n_sa_delivery_date:
-                    print('l10n_sa_delivery_date')
                     time_sa = record.l10n_sa_delivery_date
+
                 timestamp_enc = get_qr_encoding(3, time_sa.isoformat())
                 invoice_total_enc = get_qr_encoding(4, str(record.amount_total))
-                total_vat_enc = get_qr_encoding(5, str(record.currency_id.round(
-                    record.amount_total - record.amount_untaxed)))
-
+                total_vat_enc = get_qr_encoding(5, str(record.currency_id.round(record.amount_total - record.amount_untaxed)))
                 str_to_encode = seller_name_enc + company_vat_enc + timestamp_enc + invoice_total_enc + total_vat_enc
                 qr_code_str = base64.b64encode(str_to_encode).decode('UTF-8')
             record.l10n_sa_qr_code_str = qr_code_str
+
+    def _post(self, soft=True):
+        res = super()._post(soft)
+        for record in self:
+            if record.country_code == 'SA':
+                if not record.l10n_sa_show_delivery_date:
+                    raise UserError(_('Delivery Date cannot be empty'))
+                if record.l10n_sa_delivery_date < record.invoice_date:
+                    raise UserError(_('Delivery Date cannot be before Invoice Date'))
+                self.write({
+                    'l10n_sa_confirmation_datetime': fields.Datetime.now()
+                })
+        return res
